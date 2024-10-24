@@ -1,0 +1,368 @@
+# This Software (Dioptra) is being made available as a public service by the
+# National Institute of Standards and Technology (NIST), an Agency of the United
+# States Department of Commerce. This software was developed in part by employees of
+# NIST and in part by NIST contractors. Copyright in portions of this software that
+# were developed by NIST contractors has been licensed or assigned to NIST. Pursuant
+# to Title 17 United States Code Section 105, works of NIST employees are not
+# subject to copyright protection in the United States. However, NIST may hold
+# international copyright in software created by its employees and domestic
+# copyright (or licensing rights) in portions of software that were assigned or
+# licensed to NIST. To the extent that NIST holds copyright in this software, it is
+# being made available under the Creative Commons Attribution 4.0 International
+# license (CC BY 4.0). The disclaimers of the CC BY 4.0 license apply to all parts
+# of the software developed or licensed by NIST.
+#
+# ACCESS THE FULL CC BY 4.0 LICENSE HERE:
+# https://creativecommons.org/licenses/by/4.0/legalcode
+networks:
+  dioptra:
+    name: dioptra-deployment_dioptra
+
+services:
+  dioptra-deployment-nginx:
+    image: dioptra/nginx:dev
+    restart: always
+    hostname: dioptra-deployment-nginx
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/usr/local/bin/healthcheck.sh",
+          "http://localhost:30080",
+          "http://localhost:35000",
+          "http://localhost:35050/login",
+          "http://localhost:39000",
+          "http://localhost:39001",
+          # "https://localhost:30443",
+          # "https://localhost:35000",
+          # "https://localhost:35050/login",
+          # "https://localhost:39000",
+          # "https://localhost:39001",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    command:
+      - --wait-for
+      - dioptra-deployment-minio:9001
+      - --wait-for
+      - dioptra-deployment-dbadmin:35050
+      - --wait-for
+      - dioptra-deployment-mlflow-tracking:5000
+      - --wait-for
+      - dioptra-deployment-restapi:5000
+    env_file:
+      - ./envs/ca-certificates.env
+    networks:
+      - dioptra
+    ports:
+      - 127.0.0.1:80:30080/tcp
+      # - 127.0.0.1:443:30443/tcp
+      - 127.0.0.1:35432:5432/tcp
+      - 127.0.0.1:35000:35000/tcp
+      - 127.0.0.1:35050:35050/tcp
+      - 127.0.0.1:39000:39000/tcp
+      - 127.0.0.1:39001:39001/tcp
+    volumes:
+      - "nginx-ca-certificates:/usr/local/share/ca-certificates:rw"
+      - "nginx-conf-d:/etc/nginx/conf.d:rw"
+      - "nginx-etc-ssl:/etc/ssl:rw"
+      - "nginx-frontend:/frontend:ro"
+
+  dioptra-deployment-minio:
+    image: minio/minio:RELEASE.2024-07-16T23-46-41Z
+    restart: always
+    hostname: dioptra-deployment-minio
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "-f",
+          "http://localhost:9000/minio/health/live",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD}"
+      MINIO_KMS_SECRET_KEY: "${MINIO_KMS_SECRET_KEY}"
+    command:
+      - server
+      - /data
+      - --console-address
+      - ":9001"
+    networks:
+      - dioptra
+    volumes:
+      - "minio-certs:/root/.minio/certs:rw"
+      - "minio-data:/data:rw"
+
+  dioptra-deployment-db:
+    image: postgres:15
+    restart: always
+    hostname: dioptra-deployment-db
+    shm_size: 256MB
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "pg_isready",
+          "-U",
+          "dioptra",
+          "-d",
+          "restapi",
+        ]
+      interval: 30s
+      timeout: 60s
+      retries: 3
+      start_period: 30s
+    environment:
+      POSTGRES_USER_DIOPTRA_PASSWORD: "${POSTGRES_USER_DIOPTRA_PASSWORD}"
+    env_file:
+      - ./envs/dioptra-deployment-db.env
+    networks:
+      - dioptra
+    volumes:
+      - "postgres-data:/var/lib/postgresql/data:rw"
+      - "postgres-docker-entrypoint-initdb-d:/docker-entrypoint-initdb.d:rw"
+      - "postgres-etc-postgresql:/etc/postgresql:rw"
+      - "postgres-var-certs:/var/lib/postgresql/certs:rw"
+
+  dioptra-deployment-dbadmin:
+    image: dpage/pgadmin4:8.9
+    restart: always
+    hostname: dioptra-deployment-dbadmin
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:35050/misc/ping",
+        ]
+      interval: 30s
+      timeout: 60s
+      retries: 5
+      start_period: 80s
+    environment:
+      PGADMIN_DEFAULT_PASSWORD: "${PGADMIN_DEFAULT_PASSWORD}"
+    env_file:
+      - ./envs/dioptra-deployment-dbadmin.env
+    networks:
+      - dioptra
+    volumes:
+      - "dbadmin-ca-certificates:/etc/ssl/certs:rw"
+      - "dbadmin-data:/var/lib/pgadmin:rw"
+
+  dioptra-deployment-redis:
+    image: redis:7.2.5
+    restart: always
+    hostname: dioptra-deployment-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+    networks:
+      - dioptra
+    volumes:
+      - "redis-data:/data:rw"
+
+  dioptra-deployment-mlflow-tracking:
+    image: dioptra/mlflow-tracking:dev
+    restart: always
+    hostname: dioptra-deployment-mlflow-tracking
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    environment:
+      AWS_ACCESS_KEY_ID: "${MLFLOW_TRACKING_AWS_ACCESS_KEY_ID}"
+      AWS_SECRET_ACCESS_KEY: "${MLFLOW_TRACKING_AWS_SECRET_ACCESS_KEY}"
+      DIOPTRA_MLFLOW_TRACKING_DATABASE_URI: "${DIOPTRA_MLFLOW_TRACKING_DATABASE_URI}"
+    command:
+      - --host
+      - "0.0.0.0"
+      - --default-artifact-root
+      - "s3://mlflow-tracking/artifacts"
+      - --backend-store-uri
+      - $${DIOPTRA_MLFLOW_TRACKING_DATABASE_URI}
+      - --wait-for
+      - dioptra-deployment-minio:9001
+      - --wait-for
+      - dioptra-deployment-db:5432
+    env_file:
+      - ./envs/ca-certificates.env
+      - ./envs/dioptra-deployment-mlflow-tracking.env
+    networks:
+      - dioptra
+    volumes:
+      - "mlflow-tracking-ca-certificates:/usr/local/share/ca-certificates:rw"
+      - "mlflow-tracking-etc-ssl:/etc/ssl:rw"
+
+  dioptra-deployment-restapi:
+    image: dioptra/restapi:dev
+    restart: always
+    hostname: dioptra-deployment-restapi
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    environment:
+      AWS_ACCESS_KEY_ID: "${RESTAPI_AWS_ACCESS_KEY_ID}"
+      AWS_SECRET_ACCESS_KEY: "${RESTAPI_AWS_SECRET_ACCESS_KEY}"
+      DIOPTRA_RESTAPI_DATABASE_URI: "${DIOPTRA_RESTAPI_DATABASE_URI}"
+      LOG_LEVEL: "DEBUG"
+    command:
+      - --wait-for
+      - dioptra-deployment-redis:6379
+      - --wait-for
+      - dioptra-deployment-minio:9001
+      - --wait-for
+      - dioptra-deployment-db:5432
+      - --wait-for
+      - dioptra-deployment-mlflow-tracking:5000
+    env_file:
+      - ./envs/ca-certificates.env
+      - ./envs/dioptra-deployment-restapi.env
+    networks:
+      - dioptra
+    volumes:
+      - "restapi-ca-certificates:/usr/local/share/ca-certificates:rw"
+      - "restapi-etc-ssl:/etc/ssl:rw"
+
+  dioptra-deployment-tfcpu-01:
+    image: dioptra/tensorflow2-cpu:dev
+    restart: always
+    hostname: dioptra-deployment-tfcpu-01
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 30s
+      timeout: 60s
+      retries: 5
+      start_period: 80s
+    environment:
+      AWS_ACCESS_KEY_ID: "${WORKER_AWS_ACCESS_KEY_ID}"
+      AWS_SECRET_ACCESS_KEY: "${WORKER_AWS_SECRET_ACCESS_KEY}"
+      DIOPTRA_RESTAPI_DATABASE_URI: "${DIOPTRA_RESTAPI_DATABASE_URI}"
+      DIOPTRA_WORKER_USERNAME: "${DIOPTRA_WORKER_USERNAME}"
+      DIOPTRA_WORKER_PASSWORD: "${DIOPTRA_WORKER_PASSWORD}"
+    command:
+      - --wait-for
+      - dioptra-deployment-redis:6379
+      - --wait-for
+      - dioptra-deployment-minio:9001
+      - --wait-for
+      - dioptra-deployment-db:5432
+      - --wait-for
+      - dioptra-deployment-mlflow-tracking:5000
+      - --wait-for
+      - dioptra-deployment-restapi:5000
+      - tensorflow_cpu
+    env_file:
+      - ./envs/ca-certificates.env
+      - ./envs/dioptra-deployment-worker.env
+      - ./envs/dioptra-deployment-worker-cpu.env
+    networks:
+      - dioptra
+    volumes:
+      - "worker-ca-certificates:/usr/local/share/ca-certificates:rw"
+      - "worker-etc-ssl:/etc/ssl:rw"
+      - "/home/nilsb/dioptra-data:/dioptra/data:ro"
+      - "./healthcheck_tensorflow.sh:/usr/local/bin/healthcheck.sh"
+
+
+  dioptra-deployment-pytorchcpu-01:
+    image: dioptra/pytorch-cpu:dev
+    restart: always
+    hostname: dioptra-deployment-pytorchcpu-01
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 30s
+      timeout: 60s
+      retries: 5
+      start_period: 120s
+    environment:
+      AWS_ACCESS_KEY_ID: "${WORKER_AWS_ACCESS_KEY_ID}"
+      AWS_SECRET_ACCESS_KEY: "${WORKER_AWS_SECRET_ACCESS_KEY}"
+      DIOPTRA_RESTAPI_DATABASE_URI: "${DIOPTRA_RESTAPI_DATABASE_URI}"
+      DIOPTRA_WORKER_USERNAME: "${DIOPTRA_WORKER_USERNAME}"
+      DIOPTRA_WORKER_PASSWORD: "${DIOPTRA_WORKER_PASSWORD}"
+    command:
+      - --wait-for
+      - dioptra-deployment-redis:6379
+      - --wait-for
+      - dioptra-deployment-minio:9001
+      - --wait-for
+      - dioptra-deployment-db:5432
+      - --wait-for
+      - dioptra-deployment-mlflow-tracking:5000
+      - --wait-for
+      - dioptra-deployment-restapi:5000
+      - pytorch_cpu
+    env_file:
+      - ./envs/ca-certificates.env
+      - ./envs/dioptra-deployment-worker.env
+      - ./envs/dioptra-deployment-worker-cpu.env
+    networks:
+      - dioptra
+    volumes:
+      - "worker-ca-certificates:/usr/local/share/ca-certificates:rw"
+      - "worker-etc-ssl:/etc/ssl:rw"
+      - "./healthcheck_pytorch.sh:/usr/local/bin/healthcheck.sh"
+      - "/home/nilsb/dioptra-data:/dioptra/data:ro"
+
+
+  
+volumes:
+  dbadmin-ca-certificates:
+    name: dioptra-deployment_dbadmin-ca-certificates
+  dbadmin-data:
+    name: dioptra-deployment_dbadmin-data
+  mlflow-tracking-ca-certificates:
+    name: dioptra-deployment_mlflow-tracking-ca-certificates
+  mlflow-tracking-etc-ssl:
+    name: dioptra-deployment_mlflow-tracking-etc-ssl
+  minio-certs:
+    name: dioptra-deployment_minio-certs
+  minio-data:
+    name: dioptra-deployment_minio-data
+  nginx-ca-certificates:
+    name: dioptra-deployment_nginx-ca-certificates
+  nginx-conf-d:
+    name: dioptra-deployment_nginx-conf-d
+  nginx-etc-ssl:
+    name: dioptra-deployment_nginx-etc-ssl
+  nginx-frontend:
+    name: dioptra-deployment_nginx-frontend
+  postgres-data:
+    name: dioptra-deployment_postgres-data
+  postgres-docker-entrypoint-initdb-d:
+    name: dioptra-deployment_postgres-docker-entrypoint-initdb-d
+  postgres-etc-postgresql:
+    name: dioptra-deployment_postgres-etc-postgresql
+  postgres-var-certs:
+    name: dioptra-deployment_postgres-var-certs
+  redis-data:
+    name: dioptra-deployment_redis-data
+  restapi-ca-certificates:
+    name: dioptra-deployment_restapi-ca-certificates
+  restapi-etc-ssl:
+    name: dioptra-deployment_restapi-etc-ssl
+  worker-ca-certificates:
+    name: dioptra-deployment_worker-ca-certificates
+  worker-etc-ssl:
+    name: dioptra-deployment_worker-etc-ssl
